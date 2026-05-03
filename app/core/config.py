@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.5-flash"
     metrics_poll_interval_seconds: int = 10
     rolling_window_size: int = 50
-    anomaly_zscore_threshold: float = 2.0
+    anomaly_zscore_threshold: float = 3.0
     correlation_window_seconds: int = 5
     correlation_threshold: float = 0.8
     graph_path: str = "/data/dependency_graph.json"

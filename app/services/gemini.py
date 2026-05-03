@@ -1,4 +1,5 @@
 import asyncio
+import itertools
 from time import monotonic
 from typing import Any
 
@@ -15,12 +16,19 @@ class GeminiReasoningEngine:
     def __init__(self, settings: Settings, state: RuntimeState) -> None:
         self.settings = settings
         self.state = state
-        self.client = genai.Client(api_key=settings.gemini_api_key) if settings.gemini_api_key else None
+        self.clients = []
+        if settings.gemini_api_key:
+            keys = [k.strip() for k in settings.gemini_api_key.split(",") if k.strip()]
+            self.clients = [genai.Client(api_key=k) for k in keys]
+        self.client_cycle = itertools.cycle(self.clients) if self.clients else None
         self.logger = get_logger(__name__, "gemini")
 
     @property
     def configured(self) -> bool:
-        return self.client is not None
+        return len(self.clients) > 0
+
+    def _get_client(self) -> genai.Client | None:
+        return next(self.client_cycle) if self.client_cycle else None
 
     def status(self) -> str:
         if not self.configured:
@@ -33,7 +41,8 @@ class GeminiReasoningEngine:
 
     async def test(self) -> dict[str, Any]:
         started = monotonic()
-        if self.client is None:
+        client = self._get_client()
+        if client is None:
             return {
                 "status": "not_configured",
                 "model": self.settings.gemini_model,
@@ -42,7 +51,7 @@ class GeminiReasoningEngine:
         try:
             response = await asyncio.wait_for(
                 asyncio.to_thread(
-                    self.client.models.generate_content,
+                    client.models.generate_content,
                     model=self.settings.gemini_model,
                     contents="Return the single word ok.",
                 ),
@@ -70,7 +79,7 @@ class GeminiReasoningEngine:
 
     async def analyze(self, pod: str, namespace: str, events: list[AnomalyEvent], metrics: list[MetricPoint]) -> Insight:
         started = monotonic()
-        if self.client is None:
+        if not self.configured:
             return self._fallback(pod, namespace, events, "Gemini API key is not configured")
 
         structured_input = {
@@ -79,11 +88,79 @@ class GeminiReasoningEngine:
             "events": [self._event_summary(event) for event in events],
             "metrics": {metric.metric_type.value: metric.metric_value for metric in metrics[-10:]},
         }
-        prompt = (
-            "Analyze these Kubernetes pod events. Return JSON only with root_cause, "
-            "confidence, and recommendation. Be concise and operationally specific.\n"
-            f"{structured_input}"
-        )
+        prompt = f"""
+You are a senior Kubernetes Site Reliability Engineer (SRE) responsible for diagnosing production incidents in containerized systems.
+
+Your task is to analyze structured telemetry and anomaly events for a single Kubernetes pod and determine the most probable operational root cause.
+
+Use evidence from the telemetry timeline, resource metrics, and system events. Prefer causal explanations over correlations. Avoid speculation beyond the provided data.
+
+---
+
+ANALYSIS OBJECTIVES
+
+1. Identify the most likely root cause of the performance degradation or failure.
+2. Base your reasoning on observable signals such as:
+   - CPU, memory, disk, and network behavior
+   - restart counts
+   - latency or error spikes
+   - resource saturation or throttling
+   - dependency failures (e.g., database, PVC, network)
+3. If multiple anomalies exist, determine the primary initiating event.
+4. Provide a concrete operational recommendation that an on-call engineer can execute immediately.
+
+---
+
+DECISION RULES
+
+- Do not assume missing data.
+- If evidence is weak or ambiguous, lower the confidence level.
+- If the telemetry indicates normal behavior, state that explicitly.
+- Avoid generic advice such as "check logs" or "monitor the system."
+- Recommendations must be actionable infrastructure steps.
+
+---
+
+CONFIDENCE CRITERIA
+
+High:
+Clear causal relationship supported by strong telemetry signals.
+
+Medium:
+Likely cause inferred from correlated signals, but alternative causes remain plausible.
+
+Low:
+Insufficient or conflicting evidence.
+
+---
+
+OUTPUT REQUIREMENTS
+
+Return ONLY a valid JSON object.
+
+The JSON must contain exactly these keys:
+
+root_cause
+confidence
+recommendation
+
+Do not include explanations, markdown, or additional fields.
+
+---
+
+SYSTEM CONTEXT
+
+Cluster type: single-node edge cluster
+Workload type: stateless API
+Critical dependency: PostgreSQL
+SLO: 200ms latency
+
+---
+
+TELEMETRY DATA
+
+{structured_input}
+"""
 
         for attempt in range(3):
             try:
@@ -118,7 +195,11 @@ class GeminiReasoningEngine:
         return self._fallback(pod, namespace, events, self.state.gemini_last_error or "Gemini unavailable")
 
     def _generate(self, prompt: str) -> dict[str, Any]:
-        response = self.client.models.generate_content(
+        client = self._get_client()
+        if not client:
+            raise ValueError("No Gemini clients configured")
+        
+        response = client.models.generate_content(
             model=self.settings.gemini_model,
             contents=prompt,
             config=types.GenerateContentConfig(
