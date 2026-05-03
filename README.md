@@ -1,161 +1,190 @@
 # AI Kubernetes Observability Backend
 
-Production-oriented FastAPI backend for AI-driven Kubernetes pod observability. The backend collects Prometheus metrics, queues them in Redis, detects anomalies with deterministic rolling z-scores, correlates events with NetworkX, stores data in PostgreSQL, and uses Gemini only for reasoning and explanations.
+Production-hardened FastAPI backend for AI-driven Kubernetes pod observability. The backend collects Prometheus metrics, queues them in Redis, detects anomalies with deterministic rolling z-scores, correlates events with NetworkX, stores data in PostgreSQL, and uses Gemini for reasoning and explanations.
 
-Gemini is not required for availability. If Gemini is unavailable or the API key is missing, the backend keeps running and returns fallback insights.
+Gemini is **not** required for availability — if the API key is missing or Gemini is unreachable, the backend continues running and returns deterministic fallback insights.
+
+---
 
 ## Architecture
 
 ```text
 Kubernetes
-  -> Prometheus
-  -> Metrics Collector
-  -> Redis Queue
-  -> Detection Agents
-  -> Correlation Engine
-  -> Gemini Reasoning Engine
-  -> FastAPI
+  -> Prometheus (metrics scraping)
+  -> Metrics Collector (polls every N seconds)
+  -> Redis Queue (buffering)
+  -> Detection Agents (rolling z-score anomaly detection)
+  -> Correlation Engine (NetworkX dependency graph)
+  -> Gemini Reasoning Engine (root-cause analysis)
+  -> FastAPI API (serves results)
   -> Dashboard
 ```
 
 ## What The Services Do
 
-- Metrics collector polls Prometheus every 10 seconds.
-- Collector gathers CPU, memory, disk I/O, network throughput, PVC usage, and pod restart count.
-- Detection agents keep rolling windows of 50 values.
-- An anomaly is created when `abs(z_score) > 2`.
-- Correlation engine creates dependency edges when events occur within 5 seconds and correlation is greater than `0.8`.
-- Gemini uses `gemini-2.5-flash` for root cause explanations and recommendations.
-- PostgreSQL stores metrics, anomalies, and insights.
-- Redis is used as the event queue.
+| Component | Description |
+|---|---|
+| **Metrics Collector** | Polls Prometheus every `METRICS_POLL_INTERVAL_SECONDS` (default: 10s) for CPU, memory, disk I/O, network throughput, PVC usage, and pod restart counts |
+| **Detection Agents** | Maintain rolling windows of `ROLLING_WINDOW_SIZE` values (default: 50). An anomaly is created when `abs(z_score) > ANOMALY_ZSCORE_THRESHOLD` (default: 2.0) |
+| **Correlation Engine** | Creates dependency edges when events occur within `CORRELATION_WINDOW_SECONDS` (default: 5s) and correlation exceeds `CORRELATION_THRESHOLD` (default: 0.8) |
+| **Gemini Reasoning** | Uses `GEMINI_MODEL` (default: `gemini-2.5-flash`) for root-cause explanations and recommendations |
+| **PostgreSQL** | Stores metrics, anomalies, and AI-generated insights. Auto-purges data older than `RETENTION_DAYS` (default: 7) |
+| **Redis** | In-memory event queue between collector and processor |
 
-## 1. Go To The Project Directory
+---
 
-Most command errors happen when you are in `~` instead of the project folder.
-
-For fish shell:
-
-```fish
-cd "/home/ayu/ABB _PROJECT"
-```
-
-Check the files:
-
-```fish
-ls
-```
-
-You should see files and folders like:
+## Project Structure
 
 ```text
-app
-requirements.txt
-docker-compose.yml
-.env
-.venv
+.
+├── app/
+│   ├── main.py                 # FastAPI app, lifespan, CORS middleware
+│   ├── api/
+│   │   └── routes.py           # API endpoints (public + protected)
+│   ├── agents/
+│   │   └── detection.py        # Z-score anomaly detection agents
+│   ├── core/
+│   │   ├── auth.py             # API key authentication dependency
+│   │   ├── config.py           # Pydantic settings (reads from .env)
+│   │   ├── logging.py          # Structured JSON logging
+│   │   ├── models.py           # Data models (MetricPoint, AnomalyEvent, etc.)
+│   │   └── state.py            # Runtime state container
+│   └── services/
+│       ├── collector.py        # Prometheus metrics collector
+│       ├── correlation.py      # NetworkX correlation engine
+│       ├── gemini.py           # Gemini reasoning engine
+│       ├── processor.py        # Event processor pipeline
+│       ├── queue.py            # Redis metric queue
+│       └── storage.py          # PostgreSQL storage + retention
+├── k8s/                        # Kubernetes manifests (production)
+│   ├── namespace.yaml
+│   ├── pvc.yaml
+│   ├── deployment.yaml
+│   ├── service.yaml
+│   └── secret.example.yaml
+├── prometheus/
+│   └── prometheus.yml          # Prometheus scrape config
+├── tests/
+│   └── test_detection.py       # Unit tests
+├── docker-compose.yml          # Local dev dependencies
+├── Dockerfile                  # Multi-stage production image
+├── requirements.txt
+├── .env.example                # All configurable environment variables
+└── .gitignore
 ```
 
-## 2. Activate The Virtual Environment
+---
 
-For fish:
+## Quick Start (Local Development)
 
-```fish
-source .venv/bin/activate.fish
+### 1. Clone and Enter the Project
+
+```bash
+cd /path/to/ABBPROJECT
 ```
 
-If activation works, your shell prompt may show `(.venv)`.
+### 2. Create and Activate Virtual Environment
 
-You can also skip activation and call binaries directly:
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
 
-```fish
+Or use the venv binaries directly without activation:
+
+```bash
 .venv/bin/python
 .venv/bin/pip
-.venv/bin/uvicorn
 ```
 
-## 3. Install Python Requirements
+### 3. Install Dependencies
 
-Only needed once:
-
-```fish
+```bash
 .venv/bin/pip install -r requirements.txt
 ```
 
-Verify the FastAPI app imports:
+Verify the app imports correctly:
 
-```fish
+```bash
 .venv/bin/python -c "from app.main import app; print(app.title)"
+# Expected: AI Kubernetes Observability Backend
 ```
 
-Expected output:
+### 4. Start Local Dependencies
 
-```text
-AI Kubernetes Observability Backend
+Redis, PostgreSQL, and Prometheus are managed via Docker Compose:
+
+```bash
+docker compose up -d
 ```
 
-## 4. Start Local Dependencies
+Check all services are healthy:
 
-Start Redis, PostgreSQL, and Prometheus:
-
-```fish
-docker compose up -d redis postgres prometheus
-```
-
-Check status:
-
-```fish
+```bash
 docker compose ps
 ```
 
-Expected status:
+Expected:
 
 ```text
-redis       Up / healthy
-postgres    Up / healthy
-prometheus  Up / healthy
+redis       Up (healthy)
+postgres    Up (healthy)
+prometheus  Up (healthy)
 ```
 
-This project maps PostgreSQL to host port `55432` because local port `5432` may already be used by your system PostgreSQL.
+> **Note:** PostgreSQL is mapped to host port `55432` (not `5432`) to avoid conflicts with any system PostgreSQL installation.
 
-## 5. Configure Environment
+### 5. Configure Environment
 
-Open `.env`:
+Copy the example and fill in your values:
 
-```fish
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and set your Gemini API key:
+
+```bash
 nano .env
 ```
 
-For local testing, use:
+The `.env.example` contains every configurable setting, organized by category:
 
 ```env
+# ── Infrastructure ──────────────────────────────────────────────────────
 PROMETHEUS_URL=http://localhost:9090
 REDIS_URL=redis://localhost:6379/0
 DATABASE_URL=postgresql://observability:observability@localhost:55432/observability
+
+# ── Gemini AI ───────────────────────────────────────────────────────────
 GEMINI_API_KEY=replace-with-your-gemini-api-key
 GEMINI_MODEL=gemini-2.5-flash
+
+# ── Collector / Detection Tuning ────────────────────────────────────────
 METRICS_POLL_INTERVAL_SECONDS=10
+ROLLING_WINDOW_SIZE=50
+ANOMALY_ZSCORE_THRESHOLD=2.0
+
+# ── Correlation ─────────────────────────────────────────────────────────
+CORRELATION_WINDOW_SECONDS=5
+CORRELATION_THRESHOLD=0.8
+
+# ── Storage ─────────────────────────────────────────────────────────────
+GRAPH_PATH=./dependency_graph.json
+RETENTION_DAYS=7
+
+# ── API Server ──────────────────────────────────────────────────────────
+API_HOST=0.0.0.0
+API_PORT=8000
+API_KEY=
+CORS_ORIGINS=["*"]
 ```
 
-Replace the Gemini line with your real API key:
+If `GEMINI_API_KEY` is not set, the `/health` endpoint will show `"gemini": "fallback"` — this is expected. The backend still runs and returns deterministic fallback insights.
 
-```env
-GEMINI_API_KEY=AIza...
-```
+### 6. Start the Backend
 
-If you do not set a real key, `/health` will show:
-
-```json
-{"gemini":"fallback"}
-```
-
-That is expected. The backend still runs.
-
-## 6. Start The Backend
-
-Run:
-
-```fish
-cd "/home/ayu/ABB _PROJECT"
+```bash
 .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
@@ -168,251 +197,228 @@ database_connected
 metric_collected
 ```
 
-Keep this terminal open. Open another terminal for curl commands.
+Keep this terminal open. Use another terminal for API calls.
 
-## 7. Test The API
+### 7. Run Tests
 
-Health:
-
-```fish
-curl http://localhost:8000/health
+```bash
+.venv/bin/python -m pytest tests/ -v
 ```
 
-Expected with no Gemini key:
+---
 
-```json
-{"database":"ok","queue":"ok","collector":"ok","gemini":"fallback","collector_error":null,"gemini_error":null}
-```
+## API Endpoints
 
-Recent metrics:
+### Public (no auth required)
 
-```fish
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Health check — shows status of database, queue, collector, and Gemini |
+| `GET` | `/system/metrics` | Internal system metrics (queue size, latency, error rate) |
+
+### Protected (requires `X-API-Key` header when `API_KEY` is set)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/metrics/recent` | Last 100 collected Prometheus metrics |
+| `GET` | `/anomalies` | Detected anomaly events |
+| `GET` | `/dependencies` | Dependency graph (NetworkX export) |
+| `GET` | `/insights` | AI-generated root-cause insights |
+| `GET` | `/gemini/test` | Test Gemini connectivity |
+
+### API Key Authentication
+
+When `API_KEY` is set in `.env`, all protected endpoints require the `X-API-Key` header:
+
+```bash
+# Without API key configured — works directly
 curl http://localhost:8000/metrics/recent
+
+# With API key configured
+curl -H "X-API-Key: your-api-key-here" http://localhost:8000/metrics/recent
 ```
 
-System metrics:
+If `API_KEY` is empty or unset, authentication is **skipped** — this allows easy local development without extra setup.
 
-```fish
-curl http://localhost:8000/system/metrics
+---
+
+## Environment Variables Reference
+
+All settings are managed through `app/core/config.py` using Pydantic Settings. They can be set via `.env` file or environment variables (env vars take precedence).
+
+| Variable | Default | Description |
+|---|---|---|
+| `PROMETHEUS_URL` | `http://prometheus:9090` | Prometheus server URL |
+| `REDIS_URL` | `redis://redis:6379/0` | Redis connection URL |
+| `DATABASE_URL` | `postgresql://...@postgres:5432/...` | PostgreSQL connection string |
+| `GEMINI_API_KEY` | `None` | Google Gemini API key (optional) |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | Gemini model to use |
+| `METRICS_POLL_INTERVAL_SECONDS` | `10` | How often to poll Prometheus |
+| `ROLLING_WINDOW_SIZE` | `50` | Number of values in the detection rolling window |
+| `ANOMALY_ZSCORE_THRESHOLD` | `2.0` | Z-score threshold to trigger an anomaly |
+| `CORRELATION_WINDOW_SECONDS` | `5` | Time window for event correlation |
+| `CORRELATION_THRESHOLD` | `0.8` | Minimum correlation to create a dependency edge |
+| `GRAPH_PATH` | `/data/dependency_graph.json` | Path to persist the dependency graph |
+| `RETENTION_DAYS` | `7` | Days to keep data before automatic cleanup |
+| `API_HOST` | `0.0.0.0` | API server bind address |
+| `API_PORT` | `8000` | API server port |
+| `API_KEY` | `None` | API key for protected endpoints (disabled if empty) |
+| `CORS_ORIGINS` | `["*"]` | Allowed CORS origins |
+
+> **Local override:** For local development, `GRAPH_PATH` should be `./dependency_graph.json` (set in `.env`). The `/data/` default is intended for the Kubernetes PVC mount.
+
+---
+
+## Data Retention
+
+The backend automatically purges old data every hour. The `RETENTION_DAYS` setting (default: 7) controls the cutoff. Three tables are cleaned:
+
+- `metrics` — raw Prometheus metric rows
+- `anomalies` — detected anomaly events
+- `insights` — AI-generated root-cause insights
+
+---
+
+## CORS Configuration
+
+CORS middleware is enabled in `app/main.py`. The allowed origins are controlled by the `CORS_ORIGINS` environment variable.
+
+For local development (allow all):
+
+```env
+CORS_ORIGINS=["*"]
 ```
 
-Anomalies:
+For production (restrict to your frontend domain):
 
-```fish
-curl http://localhost:8000/anomalies
+```env
+CORS_ORIGINS=["https://dashboard.example.com"]
 ```
 
-Dependency graph:
+---
 
-```fish
-curl http://localhost:8000/dependencies
-```
+## Docker
 
-Gemini insights:
+### Build the Image
 
-```fish
-curl http://localhost:8000/insights
-```
+The Dockerfile uses a **multi-stage build** with a pinned base image (`python:3.12.8-slim`), runs as a **non-root user** (`appuser`), and starts with **gunicorn** (4 Uvicorn workers):
 
-## 8. Why Metrics May Be Empty
-
-If `/metrics/recent` returns:
-
-```json
-[]
-```
-
-then the backend is running, but Prometheus does not have Kubernetes pod metrics.
-
-Check Prometheus directly:
-
-```fish
-curl -s "http://localhost:9090/api/v1/query?query=container_cpu_usage_seconds_total"
-```
-
-If the response is:
-
-```json
-{"status":"success","data":{"resultType":"vector","result":[]}}
-```
-
-then local Prometheus is reachable, but it is only scraping itself. It does not have Kubernetes/cAdvisor metrics.
-
-This means:
-
-```text
-backend -> Prometheus API -> works
-Prometheus -> Kubernetes pod metrics -> missing
-```
-
-The backend is ready. You need to connect it to a Kubernetes Prometheus instance.
-
-## 9. Connect To Kubernetes Prometheus
-
-Find Prometheus services in your cluster:
-
-```fish
-kubectl get svc -A | grep -i prometheus
-```
-
-Common service names:
-
-```text
-monitoring prometheus-server
-monitoring kube-prometheus-stack-prometheus
-```
-
-For `prometheus-server`, port-forward with:
-
-```fish
-kubectl -n monitoring port-forward svc/prometheus-server 9090:80
-```
-
-For `kube-prometheus-stack-prometheus`, port-forward with:
-
-```fish
-kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090
-```
-
-Keep the port-forward terminal open.
-
-Then test:
-
-```fish
-curl -s "http://localhost:9090/api/v1/query?query=container_cpu_usage_seconds_total"
-```
-
-If `"result"` contains data, the backend will start storing metrics.
-
-## 10. Restart Backend After Config Changes
-
-Stop Uvicorn with `Ctrl+C` in the terminal where it is running.
-
-Then restart:
-
-```fish
-cd "/home/ayu/ABB _PROJECT"
-.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-If port `8000` is already used:
-
-```fish
-ss -ltnp | grep 8000
-```
-
-Use another port if needed:
-
-```fish
-.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8001
-```
-
-Then use:
-
-```fish
-curl http://localhost:8001/health
-```
-
-## 11. Stop Local Dependencies
-
-Stop Docker services:
-
-```fish
-docker compose down
-```
-
-Stop and delete PostgreSQL data too:
-
-```fish
-docker compose down -v
-```
-
-Only use `-v` when you want to remove the local database volume.
-
-## 12. Expected Final State
-
-When everything is configured:
-
-```fish
-curl http://localhost:8000/health
-```
-
-Expected:
-
-```json
-{
-  "database": "ok",
-  "queue": "ok",
-  "collector": "ok",
-  "gemini": "ok"
-}
-```
-
-And:
-
-```fish
-curl http://localhost:8000/metrics/recent
-```
-
-should return metric rows instead of:
-
-```json
-[]
-```
-
-## 13. Docker Build
-
-Build the backend image:
-
-```fish
+```bash
 docker build -t ai-observability-backend:latest .
 ```
 
-Run it:
+### Run with Docker
 
-```fish
+```bash
 docker run --rm -p 8000:8000 --env-file .env ai-observability-backend:latest
 ```
 
-## 14. Kubernetes Manifests
+> **Note:** When running with `--env-file .env`, make sure the URLs point to reachable hosts. If the container needs to reach docker-compose services, use `--network` or adjust the URLs.
 
-Example manifests are in `k8s/`.
+---
 
-Apply them:
+## Kubernetes Deployment
 
-```fish
-kubectl apply -f k8s/secret.example.yaml
+Production-ready manifests are in `k8s/`. These are **not used for local development** — they are templates for deploying to a Kubernetes cluster.
+
+### Manifests
+
+| File | Purpose |
+|---|---|
+| `namespace.yaml` | Creates the `ai-observability` namespace |
+| `pvc.yaml` | 100Mi PersistentVolumeClaim for dependency graph persistence |
+| `secret.example.yaml` | Template for secrets (database URL, Gemini key, API key) |
+| `deployment.yaml` | Hardened deployment with security contexts, probes, and resource limits |
+| `service.yaml` | ClusterIP service on port 8000 |
+
+### Security Features (Deployment)
+
+- **Pod-level:** `runAsNonRoot`, UID/GID `1000`
+- **Container-level:** `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`, drops all Linux capabilities
+- **Probes:** Startup (5s initial, 10 attempts), readiness (10s interval), liveness (30s interval)
+- **Resources:** 250m–1 CPU, 256Mi–1Gi memory
+- **Secrets:** `DATABASE_URL`, `GEMINI_API_KEY`, `API_KEY` injected from K8s Secret
+
+### Deploy to a Cluster
+
+```bash
+# 1. Create namespace
+kubectl apply -f k8s/namespace.yaml
+
+# 2. Create your real secret (copy from example, fill in real values)
+cp k8s/secret.example.yaml k8s/secret.yaml
+nano k8s/secret.yaml
+kubectl apply -f k8s/secret.yaml
+
+# 3. Create PVC for graph persistence
+kubectl apply -f k8s/pvc.yaml
+
+# 4. Deploy
 kubectl apply -f k8s/deployment.yaml
 kubectl apply -f k8s/service.yaml
+
+# 5. Verify
+kubectl -n ai-observability get pods
+kubectl -n ai-observability logs -f deployment/ai-observability-backend
 ```
 
-Before production use, replace the example secret values with real `DATABASE_URL` and `GEMINI_API_KEY`.
+> **Important:** Never commit `k8s/secret.yaml` — it is listed in `.gitignore`. Only `secret.example.yaml` is tracked.
+
+---
+
+## Connecting to Kubernetes Prometheus
+
+If `/metrics/recent` returns `[]`, Prometheus has no Kubernetes pod metrics.
+
+Find your cluster's Prometheus service:
+
+```bash
+kubectl get svc -A | grep -i prometheus
+```
+
+Port-forward to make it accessible locally:
+
+```bash
+# For prometheus-server
+kubectl -n monitoring port-forward svc/prometheus-server 9090:80
+
+# For kube-prometheus-stack
+kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090
+```
+
+Verify metrics are available:
+
+```bash
+curl -s "http://localhost:9090/api/v1/query?query=container_cpu_usage_seconds_total"
+```
+
+If `"result"` contains data, the backend will start collecting and processing metrics.
+
+---
 
 ## Troubleshooting
 
-If `uvicorn` is not found, use the venv binary:
+| Problem | Solution |
+|---|---|
+| `uvicorn` not found | Use `.venv/bin/uvicorn` or activate the venv first |
+| Port 8000 already in use | Check with `ss -ltnp \| grep 8000`, use `--port 8001` |
+| Database connection failed | Ensure `docker compose up -d postgres` is running and `.env` uses port `55432` |
+| `/metrics/recent` returns `[]` | Prometheus has no K8s metrics — see [Connecting to Kubernetes Prometheus](#connecting-to-kubernetes-prometheus) |
+| `"gemini": "fallback"` in `/health` | `GEMINI_API_KEY` not set — backend works without it, returning deterministic fallback insights |
+| Protected endpoint returns 401 | Include `X-API-Key` header or unset `API_KEY` in `.env` for local dev |
 
-```fish
-.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+---
+
+## Stopping Services
+
+Stop the backend: `Ctrl+C` in the uvicorn terminal.
+
+Stop Docker dependencies:
+
+```bash
+# Stop containers (keep data)
+docker compose down
+
+# Stop and delete PostgreSQL data volume
+docker compose down -v
 ```
-
-If `source .venv/bin/activate.fish` says file not found, you are probably not in the project directory:
-
-```fish
-cd "/home/ayu/ABB _PROJECT"
-source .venv/bin/activate.fish
-```
-
-If `pkill` says operation not permitted, stop Uvicorn with `Ctrl+C` in the terminal that started it, or run your own server on another port:
-
-```fish
-.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8001
-```
-
-If Prometheus query returns empty results:
-
-```json
-"result":[]
-```
-
-then Prometheus has no Kubernetes metrics. Connect to the cluster Prometheus using `kubectl port-forward`.

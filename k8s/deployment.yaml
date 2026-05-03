@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-observability-backend
+  namespace: ai-observability
+  labels:
+    app: ai-observability-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ai-observability-backend
+  template:
+    metadata:
+      labels:
+        app: ai-observability-backend
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: backend
+          # Replace with your registry image, e.g.:
+          # image: ghcr.io/your-org/ai-observability-backend:v1.0.0
+          image: ai-observability-backend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          env:
+            - name: PROMETHEUS_URL
+              value: http://prometheus-server.monitoring.svc.cluster.local:9090
+            - name: REDIS_URL
+              value: redis://redis.default.svc.cluster.local:6379/0
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ai-observability-secrets
+                  key: database-url
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ai-observability-secrets
+                  key: gemini-api-key
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ai-observability-secrets
+                  key: api-key
+            - name: GEMINI_MODEL
+              value: gemini-2.5-flash
+            - name: METRICS_POLL_INTERVAL_SECONDS
+              value: "10"
+            - name: GRAPH_PATH
+              value: /data/dependency_graph.json
+          volumeMounts:
+            - name: graph-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      volumes:
+        - name: graph-data
+          persistentVolumeClaim:
+            claimName: graph-data

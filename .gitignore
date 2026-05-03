@@ -1,0 +1,13 @@
+.venv/
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+postgres_data/
+
+# Secrets — never commit real secret manifests or key files
+k8s/secret.yaml
+*.pem
+*.key
