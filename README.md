@@ -27,7 +27,7 @@ Kubernetes
 | **Metrics Collector** | Polls Prometheus every `METRICS_POLL_INTERVAL_SECONDS` (default: 10s) for CPU, memory, disk I/O, network throughput, PVC usage, and pod restart counts |
 | **Detection Agents** | Maintain rolling windows of `ROLLING_WINDOW_SIZE` values (default: 50). An anomaly is created when `abs(z_score) > ANOMALY_ZSCORE_THRESHOLD` (default: 2.0) |
 | **Correlation Engine** | Creates dependency edges when events occur within `CORRELATION_WINDOW_SECONDS` (default: 5s) and correlation exceeds `CORRELATION_THRESHOLD` (default: 0.8) |
-| **Gemini Reasoning** | Uses `GEMINI_MODEL` (default: `gemini-2.5-flash`) for root-cause explanations and recommendations |
+| **Gemini Reasoning** | Uses `GEMINI_MODEL` (default: `gemini-3-flash`) for root-cause explanations and recommendations |
 | **PostgreSQL** | Stores metrics, anomalies, and AI-generated insights. Auto-purges data older than `RETENTION_DAYS` (default: 7) |
 | **Redis** | In-memory event queue between collector and processor |
 
@@ -158,7 +158,7 @@ DATABASE_URL=postgresql://observability:observability@localhost:55432/observabil
 
 # ── Gemini AI ───────────────────────────────────────────────────────────
 GEMINI_API_KEY=replace-with-your-gemini-api-key
-GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL=gemini-3-flash
 
 # ── Collector / Detection Tuning ────────────────────────────────────────
 METRICS_POLL_INTERVAL_SECONDS=10
@@ -252,7 +252,7 @@ All settings are managed through `app/core/config.py` using Pydantic Settings. T
 | `REDIS_URL` | `redis://redis:6379/0` | Redis connection URL |
 | `DATABASE_URL` | `postgresql://...@postgres:5432/...` | PostgreSQL connection string |
 | `GEMINI_API_KEY` | `None` | Google Gemini API key (optional) |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | Gemini model to use |
+| `GEMINI_MODEL` | `gemini-3-flash` | Gemini model to use |
 | `METRICS_POLL_INTERVAL_SECONDS` | `10` | How often to poll Prometheus |
 | `ROLLING_WINDOW_SIZE` | `50` | Number of values in the detection rolling window |
 | `ANOMALY_ZSCORE_THRESHOLD` | `2.0` | Z-score threshold to trigger an anomaly |

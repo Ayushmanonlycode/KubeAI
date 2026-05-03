@@ -49,7 +49,7 @@ spec:
                   name: ai-observability-secrets
                   key: api-key
             - name: GEMINI_MODEL
-              value: gemini-2.5-flash
+              value: gemini-3-flash
             - name: METRICS_POLL_INTERVAL_SECONDS
               value: "10"
             - name: GRAPH_PATH

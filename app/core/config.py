@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://redis:6379/0"
     database_url: str = "postgresql://observability:observability@postgres:5432/observability"
     gemini_api_key: str | None = Field(default=None, repr=False)
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3-flash"
     metrics_poll_interval_seconds: int = 10
     rolling_window_size: int = 50
     anomaly_zscore_threshold: float = 2.0
