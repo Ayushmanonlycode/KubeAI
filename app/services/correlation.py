@@ -12,6 +12,14 @@ from app.core.models import AnomalyEvent
 
 
 class CorrelationEngine:
+    """Builds a dependency graph from temporally correlated anomaly events.
+
+    **Important:** This engine writes graph state to a single JSON file.
+    It must run in exactly one worker process (the ``app.worker`` entrypoint)
+    to prevent write races. The API process reads the graph via
+    ``export_json()`` but never writes to the file.
+    """
+
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.graph = nx.DiGraph()

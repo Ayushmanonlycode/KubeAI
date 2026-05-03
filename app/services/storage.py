@@ -17,6 +17,8 @@ class StorageEngine:
         self.logger = get_logger(__name__, "storage")
 
     async def start(self) -> None:
+        """Connect to the database. Raises RuntimeError if all retries fail."""
+        last_error: Exception | None = None
         for attempt in range(5):
             try:
                 self.pool = await asyncpg.create_pool(self.settings.database_url, min_size=1, max_size=10)
@@ -24,11 +26,13 @@ class StorageEngine:
                 self.logger.info("database_connected", extra={"event": "database_connected", "status": "success"})
                 return
             except Exception as exc:
+                last_error = exc
                 self.logger.warning(
                     "database_connect_failed",
-                    extra={"event": "database_connect_failed", "status": "retry", "error": str(exc)},
+                    extra={"event": "database_connect_failed", "status": "retry", "attempt": attempt + 1, "error": str(exc)},
                 )
                 await asyncio.sleep(min(2**attempt, 30))
+        raise RuntimeError(f"Database unavailable after 5 retries: {last_error}")
 
     async def _migrate(self) -> None:
         if self.pool is None:
@@ -47,6 +51,7 @@ class StorageEngine:
                 CREATE INDEX IF NOT EXISTS idx_metrics_timestamp ON metrics(timestamp);
                 CREATE INDEX IF NOT EXISTS idx_metrics_pod_name ON metrics(pod_name);
                 CREATE INDEX IF NOT EXISTS idx_metrics_metric_type ON metrics(metric_type);
+                CREATE INDEX IF NOT EXISTS idx_metrics_composite ON metrics(namespace, pod_name, metric_type, timestamp);
 
                 CREATE TABLE IF NOT EXISTS anomalies (
                     id BIGSERIAL PRIMARY KEY,
@@ -58,6 +63,8 @@ class StorageEngine:
                     severity TEXT NOT NULL,
                     z_score DOUBLE PRECISION NOT NULL
                 );
+                CREATE INDEX IF NOT EXISTS idx_anomalies_timestamp ON anomalies(timestamp);
+                CREATE INDEX IF NOT EXISTS idx_anomalies_pod ON anomalies(namespace, pod_name, timestamp);
 
                 CREATE TABLE IF NOT EXISTS insights (
                     id BIGSERIAL PRIMARY KEY,
@@ -70,6 +77,7 @@ class StorageEngine:
                     fallback BOOLEAN NOT NULL,
                     source_events JSONB NOT NULL
                 );
+                CREATE INDEX IF NOT EXISTS idx_insights_timestamp ON insights(timestamp);
                 """
             )
 
@@ -98,6 +106,7 @@ class StorageEngine:
             )
 
     async def insert_anomaly(self, anomaly: AnomalyEvent) -> None:
+        """Insert a single anomaly. Prefer insert_anomalies for batches."""
         if self.pool is None:
             return
         async with self.pool.acquire() as conn:
@@ -115,7 +124,25 @@ class StorageEngine:
                 anomaly.z_score,
             )
 
+    async def insert_anomalies(self, anomalies: list[AnomalyEvent]) -> None:
+        """Batch insert anomalies using executemany."""
+        if self.pool is None or not anomalies:
+            return
+        rows = [
+            (a.timestamp, a.pod_name, a.namespace, a.metric_type.value, a.metric_value, a.severity, a.z_score)
+            for a in anomalies
+        ]
+        async with self.pool.acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO anomalies (timestamp, pod_name, namespace, metric_type, metric_value, severity, z_score)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                """,
+                rows,
+            )
+
     async def insert_insight(self, insight: Insight) -> None:
+        """Insert a single insight. Prefer insert_insights for batches."""
         if self.pool is None:
             return
         async with self.pool.acquire() as conn:
@@ -132,6 +159,23 @@ class StorageEngine:
                 insight.recommendation,
                 insight.fallback,
                 json.dumps(insight.source_events),
+            )
+
+    async def insert_insights(self, insights: list[Insight]) -> None:
+        """Batch insert insights using executemany."""
+        if self.pool is None or not insights:
+            return
+        rows = [
+            (i.timestamp, i.pod, i.namespace, i.root_cause, i.confidence, i.recommendation, i.fallback, json.dumps(i.source_events))
+            for i in insights
+        ]
+        async with self.pool.acquire() as conn:
+            await conn.executemany(
+                """
+                INSERT INTO insights (timestamp, pod_name, namespace, root_cause, confidence, recommendation, fallback, source_events)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+                """,
+                rows,
             )
 
     async def recent_metrics(self, limit: int = 100) -> list[dict[str, Any]]:

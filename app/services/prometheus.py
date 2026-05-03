@@ -1,8 +1,10 @@
+import asyncio
 from datetime import datetime, timezone
 
 import httpx
 
 from app.core.config import Settings
+from app.core.logging import get_logger
 from app.core.models import MetricPoint, MetricType
 
 
@@ -19,7 +21,11 @@ PROMQL = {
 class PrometheusClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.client = httpx.AsyncClient(base_url=settings.prometheus_url, timeout=5.0)
+        self.client = httpx.AsyncClient(
+            base_url=settings.prometheus_url,
+            timeout=settings.prometheus_timeout_seconds,
+        )
+        self.logger = get_logger(__name__, "prometheus")
 
     async def query_metric(self, metric_type: MetricType) -> list[MetricPoint]:
         response = await self.client.get("/api/v1/query", params={"query": PROMQL[metric_type]})
@@ -48,9 +54,28 @@ class PrometheusClient:
         return points
 
     async def collect_all(self) -> list[MetricPoint]:
+        """Query all metric types concurrently.
+
+        One failed query does not block or fail the entire collection cycle.
+        Errors are logged individually and the successful results are returned.
+        """
+        tasks = [self.query_metric(mt) for mt in PROMQL]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
         points: list[MetricPoint] = []
-        for metric_type in PROMQL:
-            points.extend(await self.query_metric(metric_type))
+        for metric_type, result in zip(PROMQL, results):
+            if isinstance(result, Exception):
+                self.logger.error(
+                    "prometheus_query_failed",
+                    extra={
+                        "event": "prometheus_query_failed",
+                        "status": "error",
+                        "metric_type": metric_type.value,
+                        "error": str(result),
+                    },
+                )
+            else:
+                points.extend(result)
         return points
 
     async def close(self) -> None:

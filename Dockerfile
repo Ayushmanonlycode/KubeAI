@@ -24,9 +24,11 @@ USER appuser
 
 EXPOSE 8000
 
+# Default: run the API with gunicorn (1 worker — scale via replicas, not workers)
+# Override for the worker: ["python", "-m", "app.worker"]
 CMD ["gunicorn", "app.main:app", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \
-     "--workers", "4", \
+     "--workers", "1", \
      "--bind", "0.0.0.0:8000", \
      "--timeout", "120", \
      "--graceful-timeout", "30"]

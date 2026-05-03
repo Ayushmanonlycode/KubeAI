@@ -72,6 +72,14 @@ class LogAgent(BaseAgent):
     metric_type = MetricType.logs
 
 
+class PVCAgent(BaseAgent):
+    metric_type = MetricType.pvc_usage
+
+
+class RestartAgent(BaseAgent):
+    metric_type = MetricType.restarts
+
+
 class DetectionAgents:
     def __init__(self, settings: Settings) -> None:
         self.agents = [
@@ -80,6 +88,8 @@ class DetectionAgents:
             StorageAgent(settings),
             NetworkAgent(settings),
             LogAgent(settings),
+            PVCAgent(settings),
+            RestartAgent(settings),
         ]
 
     def observe(self, metric: MetricPoint) -> list[AnomalyEvent]:

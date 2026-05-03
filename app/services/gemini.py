@@ -46,7 +46,7 @@ class GeminiReasoningEngine:
                     model=self.settings.gemini_model,
                     contents="Return the single word ok.",
                 ),
-                timeout=8,
+                timeout=self.settings.gemini_timeout_seconds,
             )
             self.state.gemini_ok = True
             self.state.gemini_last_error = None
@@ -87,7 +87,10 @@ class GeminiReasoningEngine:
 
         for attempt in range(3):
             try:
-                response = await asyncio.wait_for(asyncio.to_thread(self._generate, prompt), timeout=8)
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(self._generate, prompt),
+                    timeout=self.settings.gemini_timeout_seconds,
+                )
                 insight = Insight(
                     pod=pod,
                     namespace=namespace,

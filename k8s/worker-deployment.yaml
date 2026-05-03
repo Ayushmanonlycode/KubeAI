@@ -1,22 +1,26 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: ai-observability-backend
+  name: ai-observability-worker
   namespace: ai-observability
   labels:
     app: ai-observability-backend
-    component: api
+    component: worker
 spec:
+  # Worker MUST be exactly 1 replica to prevent duplicate collection
+  # and graph write races.
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: ai-observability-backend
-      component: api
+      component: worker
   template:
     metadata:
       labels:
         app: ai-observability-backend
-        component: api
+        component: worker
     spec:
       serviceAccountName: ai-observability
       securityContext:
@@ -25,16 +29,11 @@ spec:
         runAsGroup: 1000
         fsGroup: 1000
       containers:
-        - name: api
-          # Pin to an immutable tag or digest — never use :latest in production
-          # image: ghcr.io/your-org/ai-observability-backend@sha256:abc123...
+        - name: worker
           image: ai-observability-backend:v1.0.0
           imagePullPolicy: IfNotPresent
-          ports:
-            - containerPort: 8000
+          command: ["python", "-m", "app.worker"]
           env:
-            - name: ENVIRONMENT
-              value: production
             - name: PROMETHEUS_URL
               value: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
             - name: REDIS_URL
@@ -49,18 +48,13 @@ spec:
                 secretKeyRef:
                   name: ai-observability-secrets
                   key: gemini-api-key
-            - name: API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: ai-observability-secrets
-                  key: api-key
             - name: GEMINI_MODEL
               value: gemini-2.5-flash
-            - name: CORS_ORIGINS
-              value: '["https://dashboard.example.com"]'
+            - name: GRAPH_PATH
+              value: /data/dependency_graph.json
           volumeMounts:
-            - name: tmp-dir
-              mountPath: /tmp
+            - name: graph-data
+              mountPath: /data
           resources:
             requests:
               cpu: 250m
@@ -74,25 +68,7 @@ spec:
             capabilities:
               drop:
                 - ALL
-          startupProbe:
-            httpGet:
-              path: /ready
-              port: 8000
-            initialDelaySeconds: 5
-            periodSeconds: 5
-            failureThreshold: 10
-          readinessProbe:
-            httpGet:
-              path: /ready
-              port: 8000
-            initialDelaySeconds: 10
-            periodSeconds: 10
-          livenessProbe:
-            httpGet:
-              path: /live
-              port: 8000
-            initialDelaySeconds: 30
-            periodSeconds: 30
       volumes:
-        - name: tmp-dir
-          emptyDir: {}
+        - name: graph-data
+          persistentVolumeClaim:
+            claimName: graph-data

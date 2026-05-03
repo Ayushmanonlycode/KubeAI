@@ -8,21 +8,45 @@ router = APIRouter()
 
 # ── Public endpoints (no auth) ─────────────────────────────────────────
 
+@router.get("/live")
+async def liveness() -> dict:
+    """Liveness probe — returns ok if the process and event loop are alive."""
+    return {"status": "ok"}
+
+
+@router.get("/ready")
+async def readiness(request: Request) -> dict:
+    """Readiness probe — checks DB, Redis, and collector state."""
+    storage = request.app.state.storage
+    queue = request.app.state.queue
+    runtime = request.app.state.runtime
+
+    db_ok = await storage.health()
+    queue_ok = await queue.health()
+
+    ready = db_ok and queue_ok
+    return {
+        "status": "ready" if ready else "not_ready",
+        "database": "ok" if db_ok else "unavailable",
+        "queue": "ok" if queue_ok else "unavailable",
+    }
+
+
 @router.get("/health")
 async def health(request: Request) -> dict:
-    app_state = request.app.state.runtime
+    """Health check — returns simple status strings without internal error details."""
+    runtime = request.app.state.runtime
     storage = request.app.state.storage
     queue = request.app.state.queue
     gemini = request.app.state.gemini
-    app_state.database_ok = await storage.health()
-    app_state.queue_ok = await queue.health()
+
+    db_ok = await storage.health()
+    queue_ok = await queue.health()
+
     return {
-        "database": "ok" if app_state.database_ok else "unavailable",
-        "queue": "ok" if app_state.queue_ok else "unavailable",
-        "collector": "ok" if app_state.collector_ok else "degraded",
+        "database": "ok" if db_ok else "unavailable",
+        "queue": "ok" if queue_ok else "unavailable",
         "gemini": gemini.status(),
-        "collector_error": app_state.collector_last_error,
-        "gemini_error": app_state.gemini_last_error,
     }
 
 

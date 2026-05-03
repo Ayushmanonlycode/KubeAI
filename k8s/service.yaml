@@ -8,6 +8,7 @@ metadata:
 spec:
   selector:
     app: ai-observability-backend
+    component: api
   ports:
     - name: http
       port: 8000

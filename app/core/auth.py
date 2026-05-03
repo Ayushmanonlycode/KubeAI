@@ -1,3 +1,5 @@
+import secrets
+
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import APIKeyHeader
 
@@ -12,11 +14,17 @@ async def require_api_key(
 
     If no API key is configured the check is skipped so that local
     development works without extra setup.
+
+    In production (``ENVIRONMENT=production``), a missing API key
+    causes the startup to fail (handled in ``main.py``), so this
+    guard will always have an expected key to compare against.
+
+    Uses ``secrets.compare_digest`` to prevent timing attacks.
     """
     expected: str | None = request.app.state.settings.api_key
     if expected is None:
         return
-    if key is None or key != expected:
+    if key is None or not secrets.compare_digest(key, expected):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing API key",

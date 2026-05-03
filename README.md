@@ -182,24 +182,60 @@ CORS_ORIGINS=["*"]
 
 If `GEMINI_API_KEY` is not set, the `/health` endpoint will show `"gemini": "fallback"` — this is expected. The backend still runs and returns deterministic fallback insights.
 
-### 6. Start the Backend
+### 6. Start the Backend (API & Worker)
+
+The backend architecture is split into two distinct processes: an API service and a background Worker. **Both must be running simultaneously.**
+
+#### Option A: Using Docker Compose (Recommended)
+
+The easiest way to run the entire stack (Redis, Postgres, Prometheus, API, and Worker) is via Docker Compose:
 
 ```bash
+# Start all services in the background
+docker compose up -d
+```
+
+To view logs for the backend services:
+
+```bash
+docker compose logs -f api worker
+```
+
+#### Option B: Running Locally (Virtual Environment)
+
+If you prefer to run the Python code locally on your host (while keeping Redis/Postgres/Prometheus in Docker), you must open **two separate terminal windows**.
+
+**Terminal 1 — Start the API Server:**
+```bash
+# Activates the API process serving HTTP traffic
 .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
+*Expected logs: `api_started` and `Uvicorn running on http://0.0.0.0:8000`*
 
-Expected logs:
+**Terminal 2 — Start the Background Worker:**
+```bash
+# Activates the background collector, anomaly detector, and AI processor
+.venv/bin/python -m app.worker
+```
+*Expected logs: `worker_started` and recurring `anomalies_detected` / `insight_generated` events*
 
-```text
-Application startup complete.
-Uvicorn running on http://0.0.0.0:8000
-database_connected
-metric_collected
+---
+
+### 7. Stop the Backend
+
+**If using Docker Compose:**
+Stop everything gracefully (preserves database data in volumes):
+```bash
+docker compose down
 ```
 
-Keep this terminal open. Use another terminal for API calls.
+**If running locally:**
+Press `Ctrl+C` in both the API and Worker terminal windows. The processes are configured to intercept the shutdown signal, finish their current tasks, close database/queue connections, and exit cleanly.
 
-### 7. Run Tests
+---
+
+### 8. Run Tests
+
 
 ```bash
 .venv/bin/python -m pytest tests/ -v
@@ -228,17 +264,32 @@ Keep this terminal open. Use another terminal for API calls.
 
 ### API Key Authentication
 
-When `API_KEY` is set in `.env`, all protected endpoints require the `X-API-Key` header:
+The `API_KEY` setting protects your backend from unauthorized access. 
+
+To generate a secure, random API key, you can run this Python command:
+```bash
+python -c "import secrets; print(secrets.token_hex(16))"
+# Example output: 556eaf3e2c550cbf4896941a9xxxxxxxx
+```
+
+Copy the output and place it in your `.env` file:
+```env
+API_KEY=556eaf3e2c550cbf4896941a9xxxxxxxx
+```
+
+**Important:** If you change the `.env` file while Docker is running, you must restart the containers for the new key to take effect:
+```bash
+docker compose down && docker compose up -d
+```
+
+When `API_KEY` is set, all protected endpoints require the `X-API-Key` header:
 
 ```bash
-# Without API key configured — works directly
-curl http://localhost:8000/metrics/recent
-
 # With API key configured
 curl -H "X-API-Key: your-api-key-here" http://localhost:8000/metrics/recent
 ```
 
-If `API_KEY` is empty or unset, authentication is **skipped** — this allows easy local development without extra setup.
+If `API_KEY` is empty or unset (`API_KEY=`), authentication is **skipped** — this allows easy local development without extra setup.
 
 ---
 
@@ -342,59 +393,68 @@ Production-ready manifests are in `k8s/`. These are **not used for local develop
 ### Deploy to a Cluster
 
 ```bash
-# 1. Create namespace
+# 1. Create the namespace first
 kubectl apply -f k8s/namespace.yaml
 
-# 2. Create your real secret (copy from example, fill in real values)
+# 2. Create the ServiceAccount
+kubectl apply -f k8s/serviceaccount.yaml
+
+# 3. Create your real secret (copy from example, fill in real values)
 cp k8s/secret.example.yaml k8s/secret.yaml
 nano k8s/secret.yaml
 kubectl apply -f k8s/secret.yaml
 
-# 3. Create PVC for graph persistence
+# 4. Create PVC for graph persistence
 kubectl apply -f k8s/pvc.yaml
 
-# 4. Deploy
+# 5. Deploy the API and Worker pods
 kubectl apply -f k8s/deployment.yaml
-kubectl apply -f k8s/service.yaml
+kubectl apply -f k8s/worker-deployment.yaml
 
-# 5. Verify
-kubectl -n ai-observability get pods
-kubectl -n ai-observability logs -f deployment/ai-observability-backend
+# 6. Apply Networking and Scaling rules
+kubectl apply -f k8s/service.yaml
+kubectl apply -f k8s/networkpolicy.yaml
+kubectl apply -f k8s/hpa.yaml
+kubectl apply -f k8s/pdb.yaml
+
+# 7. Verify
+kubectl -n ai-observability get pods,svc,hpa
 ```
 
 > **Important:** Never commit `k8s/secret.yaml` — it is listed in `.gitignore`. Only `secret.example.yaml` is tracked.
 
 ---
 
-## Connecting to Kubernetes Prometheus
+## Generating Real Data (Kubernetes Prometheus)
 
-If `/metrics/recent` returns `[]`, Prometheus has no Kubernetes pod metrics.
+If `/metrics/recent` returns `[]`, it means your Prometheus instance is not connected to a Kubernetes cluster and has no pod metrics to scrape.
 
-Find your cluster's Prometheus service:
-
-```bash
-kubectl get svc -A | grep -i prometheus
-```
-
-Port-forward to make it accessible locally:
+To get real Kubernetes metrics, install the industry-standard **kube-prometheus-stack** into your cluster using Helm:
 
 ```bash
-# For prometheus-server
-kubectl -n monitoring port-forward svc/prometheus-server 9090:80
+# 1. Add the official Prometheus Helm repository
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
 
-# For kube-prometheus-stack
-kubectl -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090
+# 2. Install the Prometheus stack into your cluster
+helm install prometheus prometheus-community/kube-prometheus-stack -n monitoring --create-namespace
 ```
 
-Verify metrics are available:
-
-```bash
-curl -s "http://localhost:9090/api/v1/query?query=container_cpu_usage_seconds_total"
-```
-
-If `"result"` contains data, the backend will start collecting and processing metrics.
+Once installed, ensure your `PROMETHEUS_URL` in `k8s/deployment.yaml` and `k8s/worker-deployment.yaml` points to the new in-cluster Prometheus:
+`http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090`
 
 ---
+
+## Testing with Postman
+
+We provide an imported Postman Collection (`ai_observability_postman_collection.json`) in the root directory for easy testing.
+
+1. Port-forward the Kubernetes API to your local machine:
+   ```bash
+   kubectl -n ai-observability port-forward svc/ai-observability-backend 8001:8000
+   ```
+2. Import `ai_observability_postman_collection.json` into Postman.
+3. The collection is pre-configured to point to `http://localhost:8001` and injects your `X-API-Key` automatically. Simply hit **Send** on any endpoint.
 
 ## Troubleshooting
 
@@ -409,11 +469,76 @@ If `"result"` contains data, the backend will start collecting and processing me
 
 ---
 
+## End-to-End Walkthrough: Seeing AI Insights in Action
+
+Want to see the entire pipeline working from scratch? Follow these exact steps to simulate a pod failure, trigger an anomaly, and generate a Gemini AI insight.
+
+### Step 1: Start the Stack
+Make sure you have configured your `GEMINI_API_KEY` in your `.env` file. Then, start everything via Docker Compose:
+```bash
+docker compose up -d
+```
+Check that all containers (redis, postgres, prometheus, api, worker) are running:
+```bash
+docker compose ps
+```
+
+### Step 2: Observe Baseline Metrics
+Wait about 30 seconds for the `worker` to collect a few data points and establish a baseline in the rolling window.
+Open another terminal and verify metrics are flowing:
+```bash
+# Note: If API_KEY is set in .env, add: -H "X-API-Key: your-key"
+curl -s http://localhost:8000/metrics/recent
+```
+*(You should see an array of JSON objects representing CPU/Memory/PVC usage).*
+
+### Step 3: Simulate an Anomaly
+By default, the backend monitors Prometheus data. Since you are running Prometheus locally without a real Kubernetes cluster attached, we can force a metric directly into the Redis queue to trigger an anomaly.
+
+Run this command to push a massively spiked CPU metric directly into the Redis stream:
+```bash
+docker exec -it $(docker compose ps -q redis) redis-cli XADD metrics "*" data '{"pod_name": "payment-service", "namespace": "default", "metric_type": "cpu", "metric_value": 950.5, "timestamp": "2026-05-03T12:00:00Z"}'
+```
+
+### Step 4: Check Detected Anomalies
+The `worker` will consume this metric instantly. Because `950.5` is way above the baseline (triggering a high Z-score), the `EventProcessor` will flag it as an anomaly.
+Check the API:
+```bash
+# Note: If API_KEY is set in .env, add: -H "X-API-Key: your-key"
+curl -s http://localhost:8000/anomalies
+```
+*(You should see the `payment-service` CPU event with a `critical` severity).*
+
+### Step 5: View the AI Insight
+The anomaly detection process automatically enqueued a request to the Gemini API. The `InsightWorker` picks this up and generates a root-cause analysis.
+Wait a few seconds for the AI to respond, then fetch the insights:
+```bash
+# Note: If API_KEY is set in .env, add: -H "X-API-Key: your-key"
+curl -s http://localhost:8000/insights | jq
+```
+
+**Example AI Output:**
+```json
+[
+  {
+    "pod": "payment-service",
+    "namespace": "default",
+    "root_cause": "The payment-service pod experienced a sudden, massive CPU utilization spike (value: 950.5) that significantly exceeds normal operational baselines.",
+    "confidence": "High",
+    "recommendation": "1. Check application logs for infinite loops or sudden bursts in transaction volume. 2. Verify if a recent deployment introduced a CPU regression. 3. Consider scaling up the replica count or increasing CPU limits if the load is legitimate.",
+    "fallback": false
+  }
+]
+```
+If you see `"fallback": false`, congratulations! The **Gemini 3 Flash** model successfully analyzed your anomaly.
+
+---
+
 ## Stopping Services
 
-Stop the backend: `Ctrl+C` in the uvicorn terminal.
+Stop the backend if you are running Option B locally: `Ctrl+C` in the terminal windows.
 
-Stop Docker dependencies:
+Stop Docker dependencies (Option A & B):
 
 ```bash
 # Stop containers (keep data)

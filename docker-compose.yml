@@ -40,5 +40,36 @@ services:
       timeout: 3s
       retries: 10
 
+  # ── Application services ─────────────────────────────────────────────
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      PROMETHEUS_URL: "http://prometheus:9090"
+      REDIS_URL: "redis://redis:6379/0"
+      DATABASE_URL: "postgresql://observability:observability@postgres:5432/observability"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: ["python", "-m", "app.worker"]
+    env_file: .env
+    environment:
+      PROMETHEUS_URL: "http://prometheus:9090"
+      REDIS_URL: "redis://redis:6379/0"
+      DATABASE_URL: "postgresql://observability:observability@postgres:5432/observability"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
 volumes:
   postgres_data:
