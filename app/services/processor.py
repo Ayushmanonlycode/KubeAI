@@ -92,8 +92,8 @@ class EventProcessor:
 class InsightWorker:
     """Consumes insight requests from a separate Redis stream and calls Gemini.
 
-    Runs with a concurrency semaphore so that multiple Gemini calls
-    can proceed in parallel without overwhelming the API.
+    Drains requests in short intervals, merges repeated pod anomalies into a
+    single analysis, and only calls Gemini for high-priority batches.
     """
 
     def __init__(
@@ -103,23 +103,21 @@ class InsightWorker:
         storage: StorageEngine,
         gemini: "GeminiReasoningEngine",  # noqa: F821
         state: RuntimeState,
-        max_concurrency: int = 3,
     ) -> None:
+        self.settings = settings
         self.queue = queue
         self.storage = storage
         self.gemini = gemini
         self.state = state
-        self.semaphore = asyncio.Semaphore(max_concurrency)
         self.logger = get_logger(__name__, "insight-worker")
 
     async def run(self) -> None:
         while True:
             try:
-                result = await self.queue.consume_insight_request()
-                if result is None:
+                requests = await self._collect_batch()
+                if not requests:
                     continue
-                msg_id, request = result
-                asyncio.create_task(self._process(msg_id, request))
+                await self._process_batch(requests)
             except Exception as exc:
                 self.logger.error(
                     "insight_consume_failed",
@@ -127,20 +125,51 @@ class InsightWorker:
                 )
                 await asyncio.sleep(2)
 
-    async def _process(self, msg_id: str, request: dict) -> None:
-        async with self.semaphore:
+    async def _collect_batch(self) -> list[tuple[str, dict]]:
+        batch = await self.queue.consume_insight_requests(self.settings.insight_batch_size, timeout_ms=2000)
+        if not batch:
+            return []
+
+        deadline = monotonic() + self.settings.insight_batch_window_seconds
+        while len(batch) < self.settings.insight_batch_size:
+            remaining_ms = int(max(0.0, deadline - monotonic()) * 1000)
+            if remaining_ms <= 0:
+                break
+            more = await self.queue.consume_insight_requests(
+                self.settings.insight_batch_size - len(batch),
+                timeout_ms=min(remaining_ms, 1000),
+            )
+            if more:
+                batch.extend(more)
+        return batch
+
+    async def _process_batch(self, requests: list[tuple[str, dict]]) -> None:
+        from app.core.models import AnomalyEvent, MetricPoint
+
+        grouped: dict[tuple[str, str], dict[str, object]] = {}
+        for msg_id, request in requests:
+            pod = request["pod"]
+            namespace = request["namespace"]
+            key = (namespace, pod)
+            group = grouped.setdefault(key, {"msg_ids": [], "events": [], "metrics": []})
+            group["msg_ids"].append(msg_id)  # type: ignore[union-attr]
+            group["events"].extend(AnomalyEvent.model_validate(e) for e in request.get("events", []))  # type: ignore[union-attr]
+            group["metrics"].extend(MetricPoint.model_validate(m) for m in request.get("metrics", []))  # type: ignore[union-attr]
+
+        for (namespace, pod), group in grouped.items():
             try:
-                from app.core.models import AnomalyEvent, MetricPoint
+                msg_ids = group["msg_ids"]  # type: ignore[assignment]
+                events = self._dedupe_events(group["events"])  # type: ignore[arg-type]
+                metrics = self._dedupe_metrics(group["metrics"])  # type: ignore[arg-type]
 
-                pod = request["pod"]
-                namespace = request["namespace"]
-                events = [AnomalyEvent.model_validate(e) for e in request.get("events", [])]
-                metrics = [MetricPoint.model_validate(m) for m in request.get("metrics", [])]
+                if self._should_call_ai(events):
+                    insight = await self.gemini.analyze(pod, namespace, events, metrics)
+                else:
+                    insight = self.gemini.rules_insight(pod, namespace, events)
 
-                insight = await self.gemini.analyze(pod, namespace, events, metrics)
                 self.state.insights.appendleft(insight)
                 await self.storage.insert_insight(insight)
-                await self.queue.ack_insight(msg_id)
+                await self.queue.ack_insights(msg_ids)
 
                 self.logger.info(
                     "insight_generated",
@@ -156,3 +185,30 @@ class InsightWorker:
                     "insight_generation_failed",
                     extra={"event": "insight_generation_failed", "status": "error", "error": str(exc)},
                 )
+
+    def _should_call_ai(self, events: list[AnomalyEvent]) -> bool:
+        severity_rank = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+        threshold = severity_rank.get(self.settings.ai_min_severity.lower(), 3)
+        return any(severity_rank.get(event.severity.lower(), 0) >= threshold for event in events)
+
+    @staticmethod
+    def _dedupe_events(events: list[AnomalyEvent]) -> list[AnomalyEvent]:
+        deduped: dict[tuple[str, str, str, float, float], AnomalyEvent] = {}
+        for event in events:
+            key = (
+                event.pod_name,
+                event.namespace,
+                event.metric_type.value,
+                round(event.metric_value, 3),
+                round(event.z_score, 3),
+            )
+            deduped[key] = event
+        return sorted(deduped.values(), key=lambda event: event.timestamp)[-10:]
+
+    @staticmethod
+    def _dedupe_metrics(metrics: list[MetricPoint]) -> list[MetricPoint]:
+        deduped: dict[tuple[str, str, str, float], MetricPoint] = {}
+        for metric in metrics:
+            key = (metric.pod_name, metric.namespace, metric.metric_type.value, round(metric.metric_value, 3))
+            deduped[key] = metric
+        return sorted(deduped.values(), key=lambda metric: metric.timestamp)[-50:]

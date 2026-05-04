@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import itertools
+import json
 from time import monotonic
 from typing import Any
 
@@ -21,6 +23,9 @@ class GeminiReasoningEngine:
             keys = [k.strip() for k in settings.gemini_api_key.split(",") if k.strip()]
             self.clients = [genai.Client(api_key=k) for k in keys]
         self.client_cycle = itertools.cycle(self.clients) if self.clients else None
+        self._request_lock = asyncio.Lock()
+        self._last_request_at = 0.0
+        self._cache: dict[str, Insight] = {}
         self.logger = get_logger(__name__, "gemini")
 
     @property
@@ -49,6 +54,7 @@ class GeminiReasoningEngine:
                 "error": "Gemini API key is not configured",
             }
         try:
+            await self._throttle()
             response = await asyncio.wait_for(
                 asyncio.to_thread(
                     client.models.generate_content,
@@ -81,6 +87,10 @@ class GeminiReasoningEngine:
         started = monotonic()
         if not self.configured:
             return self._fallback(pod, namespace, events, "Gemini API key is not configured")
+        cache_key = self._cache_key(pod, namespace, events)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached.model_copy(update={"timestamp": cached.timestamp})
 
         structured_input = {
             "pod": pod,
@@ -164,6 +174,7 @@ TELEMETRY DATA
 
         for attempt in range(3):
             try:
+                await self._throttle()
                 response = await asyncio.wait_for(
                     asyncio.to_thread(self._generate, prompt),
                     timeout=self.settings.gemini_timeout_seconds,
@@ -181,6 +192,7 @@ TELEMETRY DATA
                 self.state.gemini_last_error = None
                 self.state.gemini_calls += 1
                 self.state.total_gemini_latency_ms += (monotonic() - started) * 1000
+                self._store_cache(cache_key, insight)
                 return insight
             except Exception as exc:
                 self.state.gemini_ok = False
@@ -193,6 +205,44 @@ TELEMETRY DATA
 
         self.state.error_count += 1
         return self._fallback(pod, namespace, events, self.state.gemini_last_error or "Gemini unavailable")
+
+    def rules_insight(self, pod: str, namespace: str, events: list[AnomalyEvent]) -> Insight:
+        return self._fallback(pod, namespace, events, "severity below AI threshold")
+
+    async def _throttle(self) -> None:
+        rpm = max(1, self.settings.gemini_requests_per_minute)
+        min_interval = 60.0 / rpm
+        async with self._request_lock:
+            elapsed = monotonic() - self._last_request_at
+            if elapsed < min_interval:
+                await asyncio.sleep(min_interval - elapsed)
+            self._last_request_at = monotonic()
+
+    def _store_cache(self, cache_key: str, insight: Insight) -> None:
+        if self.settings.insight_cache_size <= 0:
+            return
+        if len(self._cache) >= self.settings.insight_cache_size:
+            oldest_key = next(iter(self._cache))
+            self._cache.pop(oldest_key, None)
+        self._cache[cache_key] = insight
+
+    @staticmethod
+    def _cache_key(pod: str, namespace: str, events: list[AnomalyEvent]) -> str:
+        signature = {
+            "pod": pod,
+            "namespace": namespace,
+            "events": [
+                {
+                    "metric_type": event.metric_type.value,
+                    "severity": event.severity,
+                    "z_score": round(event.z_score, 1),
+                    "value": round(event.metric_value, 1),
+                }
+                for event in events[-10:]
+            ],
+        }
+        encoded = json.dumps(signature, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     def _generate(self, prompt: str) -> dict[str, Any]:
         client = self._get_client()

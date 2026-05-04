@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     cors_origins: list[str] = Field(default=[])
     prometheus_timeout_seconds: float = 5.0
     gemini_timeout_seconds: float = 8.0
+    gemini_requests_per_minute: int = 2
+    insight_batch_window_seconds: float = 30.0
+    insight_batch_size: int = 10
+    ai_min_severity: str = "critical"
+    insight_cache_size: int = 256
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

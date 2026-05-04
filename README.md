@@ -27,7 +27,7 @@ Kubernetes
 | **Metrics Collector** | Polls Prometheus every `METRICS_POLL_INTERVAL_SECONDS` (default: 10s) for CPU, memory, disk I/O, network throughput, PVC usage, and pod restart counts |
 | **Detection Agents** | Maintain rolling windows of `ROLLING_WINDOW_SIZE` values (default: 50). An anomaly is created when `abs(z_score) > ANOMALY_ZSCORE_THRESHOLD` (default: 2.0) |
 | **Correlation Engine** | Creates dependency edges when events occur within `CORRELATION_WINDOW_SECONDS` (default: 5s) and correlation exceeds `CORRELATION_THRESHOLD` (default: 0.8) |
-| **Gemini Reasoning** | Uses `GEMINI_MODEL` (default: `gemini-3-flash`) for root-cause explanations and recommendations |
+| **Gemini Reasoning** | Uses `GEMINI_MODEL` (default: `gemini-3-flash`) for root-cause explanations and recommendations. Insight requests are batched, cached, rate-limited, and only critical anomalies are sent to Gemini by default |
 | **PostgreSQL** | Stores metrics, anomalies, and AI-generated insights. Auto-purges data older than `RETENTION_DAYS` (default: 7) |
 | **Redis** | In-memory event queue between collector and processor |
 
@@ -159,6 +159,11 @@ DATABASE_URL=postgresql://observability:observability@localhost:55432/observabil
 # ── Gemini AI ───────────────────────────────────────────────────────────
 GEMINI_API_KEY=replace-with-your-gemini-api-key
 GEMINI_MODEL=gemini-3-flash
+GEMINI_REQUESTS_PER_MINUTE=2
+INSIGHT_BATCH_WINDOW_SECONDS=30
+INSIGHT_BATCH_SIZE=10
+AI_MIN_SEVERITY=critical
+INSIGHT_CACHE_SIZE=256
 
 # ── Collector / Detection Tuning ────────────────────────────────────────
 METRICS_POLL_INTERVAL_SECONDS=10
@@ -304,6 +309,11 @@ All settings are managed through `app/core/config.py` using Pydantic Settings. T
 | `DATABASE_URL` | `postgresql://...@postgres:5432/...` | PostgreSQL connection string |
 | `GEMINI_API_KEY` | `None` | Google Gemini API key (optional) |
 | `GEMINI_MODEL` | `gemini-3-flash` | Gemini model to use |
+| `GEMINI_REQUESTS_PER_MINUTE` | `2` | Maximum Gemini requests per worker process per minute |
+| `INSIGHT_BATCH_WINDOW_SECONDS` | `30.0` | Time window used to collect anomaly insight requests before analysis |
+| `INSIGHT_BATCH_SIZE` | `10` | Maximum insight requests to merge into one processing batch |
+| `AI_MIN_SEVERITY` | `critical` | Minimum anomaly severity required before calling Gemini |
+| `INSIGHT_CACHE_SIZE` | `256` | Number of repeated anomaly signatures cached in memory |
 | `METRICS_POLL_INTERVAL_SECONDS` | `10` | How often to poll Prometheus |
 | `ROLLING_WINDOW_SIZE` | `50` | Number of values in the detection rolling window |
 | `ANOMALY_ZSCORE_THRESHOLD` | `2.0` | Z-score threshold to trigger an anomaly |

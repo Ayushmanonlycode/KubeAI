@@ -94,6 +94,19 @@ class MetricQueue:
         request = json.loads(fields["data"])
         return msg_id, request
 
+    async def consume_insight_requests(self, count: int, timeout_ms: int = 2000) -> list[tuple[str, dict]]:
+        """Read a small batch of insight requests from the insight stream."""
+        results = await self.client.xreadgroup(
+            self.GROUP, self.consumer,
+            {self.INSIGHT_STREAM: ">"},
+            count=count,
+            block=timeout_ms,
+        )
+        if not results:
+            return []
+        _, messages = results[0]
+        return [(msg_id, json.loads(fields["data"])) for msg_id, fields in messages]
+
     # ── Acknowledgement ────────────────────────────────────────────────
 
     async def ack(self, msg_id: str) -> None:
@@ -101,6 +114,10 @@ class MetricQueue:
 
     async def ack_insight(self, msg_id: str) -> None:
         await self.client.xack(self.INSIGHT_STREAM, self.GROUP, msg_id)
+
+    async def ack_insights(self, msg_ids: list[str]) -> None:
+        if msg_ids:
+            await self.client.xack(self.INSIGHT_STREAM, self.GROUP, *msg_ids)
 
     # ── Dead letter ────────────────────────────────────────────────────
 
