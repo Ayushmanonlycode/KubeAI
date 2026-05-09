@@ -3,6 +3,7 @@
 Uses XADD for publishing, XREADGROUP + XACK for at-least-once delivery.
 Messages stay pending until explicitly acknowledged after successful processing.
 """
+import asyncio
 import json
 import socket
 from typing import Any, Iterable
@@ -10,6 +11,7 @@ from typing import Any, Iterable
 import redis.asyncio as redis
 
 from app.core.config import Settings
+from app.core.logging import get_logger
 from app.core.models import AnomalyEvent, MetricPoint
 
 
@@ -24,17 +26,35 @@ class MetricQueue:
         self.settings = settings
         self.client = redis.from_url(settings.redis_url, decode_responses=True)
         self.consumer = socket.gethostname()
+        self.logger = get_logger(__name__, "queue")
 
     # ── Setup ──────────────────────────────────────────────────────────
 
     async def ensure_group(self) -> None:
-        """Create consumer groups idempotently for both streams."""
-        for stream in (self.STREAM, self.INSIGHT_STREAM):
+        """Create consumer groups idempotently for both streams.
+
+        Retries up to 5 times with exponential backoff to survive
+        transient DNS/connection failures during container startup.
+        """
+        last_error: Exception | None = None
+        for attempt in range(5):
             try:
-                await self.client.xgroup_create(stream, self.GROUP, id="0", mkstream=True)
-            except redis.ResponseError as exc:
-                if "BUSYGROUP" not in str(exc):
-                    raise
+                for stream in (self.STREAM, self.INSIGHT_STREAM):
+                    try:
+                        await self.client.xgroup_create(stream, self.GROUP, id="0", mkstream=True)
+                    except redis.ResponseError as exc:
+                        if "BUSYGROUP" not in str(exc):
+                            raise
+                self.logger.info("redis_connected", extra={"event": "redis_connected", "status": "success"})
+                return
+            except Exception as exc:
+                last_error = exc
+                self.logger.warning(
+                    "redis_connect_failed",
+                    extra={"event": "redis_connect_failed", "status": "retry", "attempt": attempt + 1, "error": str(exc)},
+                )
+                await asyncio.sleep(min(2 ** attempt, 30))
+        raise RuntimeError(f"Redis unavailable after 5 retries: {last_error}")
 
     # ── Publishing ─────────────────────────────────────────────────────
 

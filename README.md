@@ -15,7 +15,8 @@ Kubernetes
   -> Redis Queue (buffering)
   -> Detection Agents (rolling z-score anomaly detection)
   -> Correlation Engine (NetworkX dependency graph)
-  -> Gemini Reasoning Engine (root-cause analysis)
+  -> Gemini Reasoning Engine (per-pod root-cause analysis)
+  -> Cluster Analyzer (cluster-wide incident correlation via Gemini)
   -> FastAPI API (serves results)
   -> Dashboard
 ```
@@ -28,6 +29,7 @@ Kubernetes
 | **Detection Agents** | Maintain rolling windows of `ROLLING_WINDOW_SIZE` values (default: 50). An anomaly is created when `abs(z_score) > ANOMALY_ZSCORE_THRESHOLD` (default: 2.0) |
 | **Correlation Engine** | Creates dependency edges when events occur within `CORRELATION_WINDOW_SECONDS` (default: 5s) and correlation exceeds `CORRELATION_THRESHOLD` (default: 0.8) |
 | **Gemini Reasoning** | Uses `GEMINI_MODEL` (default: `gemini-3-flash`) for root-cause explanations and recommendations. Insight requests are batched, cached, rate-limited, and only critical anomalies are sent to Gemini by default |
+| **Cluster Analyzer** | Aggregates anomalies, metrics, and dependency edges across the entire cluster and sends them to Gemini for cross-pod, cross-namespace incident correlation. Returns the top 5 most critical incidents. Falls back to deterministic ranking when Gemini is unavailable |
 | **PostgreSQL** | Stores metrics, anomalies, and AI-generated insights. Auto-purges data older than `RETENTION_DAYS` (default: 7) |
 | **Redis** | In-memory event queue between collector and processor |
 
@@ -50,6 +52,7 @@ Kubernetes
 │   │   ├── models.py           # Data models (MetricPoint, AnomalyEvent, etc.)
 │   │   └── state.py            # Runtime state container
 │   └── services/
+│       ├── cluster.py         # Cluster-wide SRE incident intelligence
 │       ├── collector.py        # Prometheus metrics collector
 │       ├── correlation.py      # NetworkX correlation engine
 │       ├── gemini.py           # Gemini reasoning engine
@@ -132,7 +135,7 @@ postgres    Up (healthy)
 prometheus  Up (healthy)
 ```
 
-> **Note:** PostgreSQL is mapped to host port `55432` (not `5432`) to avoid conflicts with any system PostgreSQL installation.
+> **Note:** PostgreSQL is mapped to host port `55432` and Redis is mapped to `56379` to avoid conflicts with system-level installations.
 
 ### 5. Configure Environment
 
@@ -265,7 +268,194 @@ Press `Ctrl+C` in both the API and Worker terminal windows. The processes are co
 | `GET` | `/anomalies` | Detected anomaly events |
 | `GET` | `/dependencies` | Dependency graph (NetworkX export) |
 | `GET` | `/insights` | AI-generated root-cause insights |
+| `GET` | `/cluster/incidents` | Cluster-wide SRE incident correlation report (top 5 critical incidents) |
 | `GET` | `/gemini/test` | Test Gemini connectivity |
+
+### Cluster-Wide Incident Intelligence
+
+The `/cluster/incidents` endpoint is the platform's **highest-level intelligence layer**. Unlike `/insights` (which analyzes individual pods), this endpoint performs **cluster-wide incident correlation** — aggregating all active anomalies, metrics, and dependency relationships across every namespace to identify the most critical operational incidents.
+
+#### How It Works
+
+```text
+GET /cluster/incidents
+  → Snapshot: StorageEngine queries anomalies + metrics from the last 1 hour
+  → Dependency Graph: CorrelationEngine exports all known pod-to-pod edges
+  → Structured Input: Per-pod summaries grouped by namespace with anomaly counts,
+    severity levels, z-scores, latest metric values, and dependency edges
+  → Gemini Analysis: Full SRE mega-prompt with the structured input
+  → Response: Top 5 most critical incidents ranked by operational risk
+  → Cache: Result cached for 60 seconds
+```
+
+#### Data Sources
+
+The endpoint aggregates data from three sources into a single structured telemetry snapshot:
+
+| Source | Data | Window |
+|---|---|---|
+| **Anomalies** | All detected anomalies (CPU, memory, disk, network, PVC, restarts) with severity and z-score | Last 1 hour |
+| **Metrics** | Latest metric values per pod per metric type | Last 1 hour |
+| **Dependencies** | Pod-to-pod correlation edges from the NetworkX dependency graph | All time (persisted) |
+
+#### Gemini AI Integration
+
+This endpoint **uses the Gemini API** (same key and rate limiter as `/insights`). The analysis follows two distinct paths:
+
+**Path 1 — AI-Powered Analysis (when `GEMINI_API_KEY` is set):**
+- Sends the full cluster snapshot to Gemini with a production-grade SRE prompt
+- Gemini performs cross-pod, cross-namespace causal reasoning
+- Identifies cascading failures, shared root causes, and dependency chains
+- Returns structured JSON with `"fallback": false`
+- Retries up to 3 times with exponential backoff on failure
+- If all retries fail, falls back to Path 2
+
+**Path 2 — Deterministic Fallback (no API key or Gemini failure):**
+- Ranks anomalies by a composite score: `severity_rank × 100 + z_score × 10 + anomaly_count`
+- Groups by pod and takes the top 5 highest-scoring pods
+- Returns structured JSON with `"fallback": true` and `"confidence": "Low"`
+- No external API calls — purely deterministic
+
+#### Confidence Scoring
+
+| Level | Meaning |
+|---|---|
+| **High** | Clear causal chain supported by strong telemetry signals |
+| **Medium** | Likely root cause inferred, but alternative causes remain plausible |
+| **Low** | Insufficient or conflicting evidence (always used in fallback mode) |
+
+#### Caching
+
+Responses are cached for **60 seconds** to prevent Gemini rate-limiting on rapid dashboard refreshes. The first call within the window hits Gemini; subsequent calls return the cached report instantly.
+
+#### Usage
+
+```bash
+# Via Kubernetes port-forward (Postman-compatible)
+curl -s -H "X-API-Key: your-key" http://localhost:8001/cluster/incidents | jq
+
+# Via local Docker Compose
+curl -s http://localhost:8000/cluster/incidents | jq
+```
+
+#### Response Schema
+
+```json
+{
+  "timestamp": "2026-05-09T12:00:00Z",
+  "cluster_summary": "Short overall cluster health summary",
+  "critical_incidents": [
+    {
+      "rank": 1,
+      "incident_title": "Short incident title",
+      "affected_services": ["service-a", "service-b"],
+      "affected_pods": ["namespace/pod-name"],
+      "root_cause": "Most probable operational root cause",
+      "impact": "Operational impact description",
+      "confidence": "High | Medium | Low",
+      "recommendation": "Specific actionable mitigation step"
+    }
+  ],
+  "fallback": false
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `timestamp` | ISO 8601 | When the report was generated |
+| `cluster_summary` | string | One-line cluster health assessment |
+| `critical_incidents` | array | 1–5 incidents ranked by operational risk |
+| `critical_incidents[].rank` | integer | Priority rank (1 = most critical) |
+| `critical_incidents[].affected_services` | string[] | Service names involved |
+| `critical_incidents[].affected_pods` | string[] | Full `namespace/pod` identifiers |
+| `critical_incidents[].root_cause` | string | Most probable root cause |
+| `critical_incidents[].impact` | string | Operational impact description |
+| `critical_incidents[].confidence` | string | Exactly `High`, `Medium`, or `Low` |
+| `critical_incidents[].recommendation` | string | Actionable mitigation step |
+| `fallback` | boolean | `true` if Gemini was unavailable |
+
+#### Example: AI-Powered Response
+
+```json
+{
+  "timestamp": "2026-05-09T12:00:00Z",
+  "cluster_summary": "Critical CPU saturation on payment-service causing cascading latency across 3 dependent services",
+  "critical_incidents": [
+    {
+      "rank": 1,
+      "incident_title": "CPU exhaustion on payment-service",
+      "affected_services": ["payment-service", "checkout-service"],
+      "affected_pods": ["default/payment-service-abc123"],
+      "root_cause": "Unbounded thread pool causing CPU starvation under load",
+      "impact": "200ms SLO breach for payment and checkout flows",
+      "confidence": "High",
+      "recommendation": "Set CPU limits to 500m, add HPA with 70% target, and investigate the thread pool configuration"
+    }
+  ],
+  "fallback": false
+}
+```
+
+#### Example: Deterministic Fallback Response
+
+```json
+{
+  "timestamp": "2026-05-09T12:00:00Z",
+  "cluster_summary": "Deterministic analysis: 8 anomalies across 3 pods in the last hour. AI correlation unavailable.",
+  "critical_incidents": [
+    {
+      "rank": 1,
+      "incident_title": "cpu, memory anomaly on default/payment-service",
+      "affected_services": ["payment-service"],
+      "affected_pods": ["default/payment-service"],
+      "root_cause": "Deterministic detection found 5 anomalies (cpu, memory) with severities: critical, high. AI reasoning unavailable: Gemini API key is not configured",
+      "impact": "Pod payment-service in namespace default exhibiting abnormal cpu, memory behavior.",
+      "confidence": "Low",
+      "recommendation": "Inspect pod resource limits, recent restarts, node pressure, and correlated dependency edges."
+    }
+  ],
+  "fallback": true
+}
+```
+
+### Gemini API Key Rotation & Quota Management
+
+To maximize uptime and bypass free-tier rate limits, the system supports **automatic API key rotation** and **intelligent retry logic**.
+
+#### Key Rotation
+- **Multi-Key Support**: Provide multiple Gemini API keys in your `.env` or Kubernetes secrets as a comma-separated list.
+  ```env
+  GEMINI_API_KEY="key1,key2,key3"
+  ```
+- **Round-Robin Execution**: The system cycles through available keys for every request (per-pod insights and cluster-wide analysis).
+- **Graceful Fallthrough**: If one key hits a `429 (Too Many Requests)` or `Quota Exhausted` error, the system immediately rotates to the next key and retries the request.
+
+#### Quota Tuning
+| Variable | Default | Description |
+|---|---|---|
+| `GEMINI_REQUESTS_PER_MINUTE` | `2` | Global throttle for Gemini requests. If you have 3 keys, you can safely set this to `6`. |
+| `AI_MIN_SEVERITY` | `critical` | Only pods with anomalies at this level or higher trigger background AI analysis. |
+| `GEMINI_RETRY_ATTEMPTS` | `3` | Number of times to retry a failed AI request (each retry rotates the key). |
+
+---
+
+### Production Resiliency & Infrastructure
+
+The following hardening measures have been implemented to ensure stability in production environments:
+
+#### 1. Redis Port Conflict Resolution
+- **Host Conflict**: If a system Redis is running on port `6379` on the host, Docker Compose is configured to map the container Redis to `56379`.
+- **K8s Connectivity**: In Minikube/K8s environments, the deployment uses `host.minikube.internal:56379` to reach the Docker-managed Redis instance, avoiding conflicts with system services.
+
+#### 2. Worker Startup Resiliency
+- **Race Condition Handling**: During container startup, DNS resolution or Redis connectivity might be momentarily unavailable.
+- **Exponential Backoff**: The worker's `ensure_group` logic includes a 5-retry exponential backoff, allowing it to survive transient infrastructure failures without crashing.
+
+#### 3. State Management & Persistence
+- **State Recovery**: The `RuntimeState` tracks Gemini health (`gemini_ok`) and error counts in memory.
+- **Dependency Graph Persistence**: The NetworkX pod dependency graph is persisted to `/data/dependency_graph.json` to survive pod restarts.
+
+---
 
 ### API Key Authentication
 
@@ -427,9 +617,25 @@ kubectl apply -f k8s/networkpolicy.yaml
 kubectl apply -f k8s/hpa.yaml
 kubectl apply -f k8s/pdb.yaml
 
-# 7. Verify
 kubectl -n ai-observability get pods,svc,hpa
 ```
+
+### Accessing & Testing in Kubernetes
+
+Since the services are running inside the cluster on a `ClusterIP` service, you must port-forward to access the API locally:
+
+```bash
+# 1. Port-forward the API (Backend)
+kubectl -n ai-observability port-forward svc/ai-observability-backend 8001:8000
+
+# 2. Test the connection (Health Check)
+curl -s http://localhost:8001/health | jq
+
+# 3. Test Protected Endpoints (using your API_KEY)
+curl -s -H "X-API-Key: YOUR_API_KEY" http://localhost:8001/cluster/incidents | jq
+```
+
+> **Postman:** The provided collection is pre-configured to use `http://localhost:8001`. Ensure the port-forward is active before sending requests.
 
 > **Important:** Never commit `k8s/secret.yaml` — it is listed in `.gitignore`. Only `secret.example.yaml` is tracked.
 

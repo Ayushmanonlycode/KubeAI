@@ -172,7 +172,8 @@ TELEMETRY DATA
 {structured_input}
 """
 
-        for attempt in range(3):
+        max_attempts = max(3, len(self.clients))  # try at least every key
+        for attempt in range(max_attempts):
             try:
                 await self._throttle()
                 response = await asyncio.wait_for(
@@ -195,13 +196,19 @@ TELEMETRY DATA
                 self._store_cache(cache_key, insight)
                 return insight
             except Exception as exc:
+                err_str = str(exc).lower()
                 self.state.gemini_ok = False
                 self.state.gemini_last_error = str(exc)
                 self.logger.warning(
                     "gemini_request_failed",
-                    extra={"event": "gemini_request_failed", "status": "retry", "attempt": attempt + 1, "error": str(exc)},
+                    extra={"event": "gemini_request_failed", "status": "retry", "attempt": attempt + 1, "max_attempts": max_attempts, "error": str(exc)},
                 )
-                await asyncio.sleep(min(2**attempt, 5))
+                # _generate() calls _get_client() which advances the
+                # round-robin cycle, so the next retry uses the next key.
+                if "quota" in err_str or "429" in err_str or "resource" in err_str:
+                    await asyncio.sleep(1)  # rotate fast on quota errors
+                else:
+                    await asyncio.sleep(min(2**attempt, 5))
 
         self.state.error_count += 1
         return self._fallback(pod, namespace, events, self.state.gemini_last_error or "Gemini unavailable")

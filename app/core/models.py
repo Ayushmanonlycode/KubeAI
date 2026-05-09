@@ -33,6 +33,24 @@ class AnomalyEvent(BaseModel):
     z_score: float
 
 
+class CriticalIncident(BaseModel):
+    rank: int
+    incident_title: str
+    affected_services: list[str]
+    affected_pods: list[str]
+    root_cause: str
+    impact: str
+    confidence: str  # "High" | "Medium" | "Low"
+    recommendation: str
+
+
+class ClusterIncidentReport(BaseModel):
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    cluster_summary: str
+    critical_incidents: list[CriticalIncident]
+    fallback: bool = False
+
+
 class Insight(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     pod: str

@@ -37,7 +37,7 @@ spec:
             - name: PROMETHEUS_URL
               value: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
             - name: REDIS_URL
-              value: redis://host.minikube.internal:6379/0
+              value: redis://host.minikube.internal:56379/0
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:

@@ -2,7 +2,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "56379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -44,6 +44,7 @@ services:
 
   api:
     build: .
+    restart: unless-stopped
     ports:
       - "8000:8000"
     env_file: .env
@@ -59,6 +60,7 @@ services:
 
   worker:
     build: .
+    restart: unless-stopped
     command: ["python", "-m", "app.worker"]
     env_file: .env
     environment:

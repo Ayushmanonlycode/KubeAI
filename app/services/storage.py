@@ -178,6 +178,42 @@ class StorageEngine:
                 rows,
             )
 
+    async def anomalies_since(self, since: datetime, limit: int = 500) -> list[dict[str, Any]]:
+        """Return anomalies newer than *since*, ordered newest-first."""
+        if self.pool is None:
+            return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT timestamp, pod_name, namespace, metric_type, metric_value, severity, z_score
+                FROM anomalies
+                WHERE timestamp > $1
+                ORDER BY timestamp DESC
+                LIMIT $2
+                """,
+                since,
+                limit,
+            )
+        return [dict(row) for row in rows]
+
+    async def metrics_since(self, since: datetime, limit: int = 1000) -> list[dict[str, Any]]:
+        """Return metrics newer than *since*, ordered newest-first."""
+        if self.pool is None:
+            return []
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT pod_name, namespace, metric_type, metric_value, timestamp
+                FROM metrics
+                WHERE timestamp > $1
+                ORDER BY timestamp DESC
+                LIMIT $2
+                """,
+                since,
+                limit,
+            )
+        return [dict(row) for row in rows]
+
     async def recent_metrics(self, limit: int = 100) -> list[dict[str, Any]]:
         if self.pool is None:
             return []

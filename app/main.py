@@ -8,6 +8,7 @@ from app.api.routes import router
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 from app.core.state import RuntimeState
+from app.services.cluster import ClusterAnalyzer
 from app.services.correlation import CorrelationEngine
 from app.services.gemini import GeminiReasoningEngine
 from app.services.queue import MetricQueue
@@ -31,6 +32,9 @@ async def lifespan(app: FastAPI):
     app.state.storage = storage
     app.state.correlation = correlation
     app.state.gemini = gemini
+
+    cluster_analyzer = ClusterAnalyzer(settings, storage, correlation, gemini, runtime)
+    app.state.cluster_analyzer = cluster_analyzer
 
     await storage.start()
 

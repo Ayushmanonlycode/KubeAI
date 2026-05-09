@@ -106,3 +106,11 @@ async def insights(request: Request) -> list[dict]:
     if rows:
         return rows
     return [insight.model_dump(mode="json") for insight in request.app.state.runtime.insights]
+
+
+@router.get("/cluster/incidents", dependencies=[Depends(require_api_key)])
+async def cluster_incidents(request: Request) -> dict:
+    """Cluster-wide SRE incident correlation and intelligence report."""
+    analyzer = request.app.state.cluster_analyzer
+    report = await analyzer.analyze()
+    return report.model_dump(mode="json")
