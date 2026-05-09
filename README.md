@@ -8,17 +8,62 @@ Gemini is **not** required for availability — if the API key is missing or Gem
 
 ## Architecture
 
+The system is designed as a high-performance, asynchronous pipeline split between **Telemetry Collection** and **Intelligence Serving**.
+
+### System Overview
+
+```mermaid
+graph TD
+    subgraph "Kubernetes Cluster"
+        K8s[K8s Pods/Nodes] -->|Scrape| Prom[Prometheus Stack]
+    end
+
+    subgraph "Observability Worker"
+        Collector[Metrics Collector] -->|Poll| Prom
+        Collector -->|Push| Redis[Redis Stream]
+        Redis -->|Consume| Detection[Detection Agents]
+        Detection -->|Z-Score| Anomaly[Anomaly Store]
+        Anomaly -->|Event| Correlation[Correlation Engine]
+        Correlation -->|Edge| Graph[Dependency Graph]
+    end
+
+    subgraph "Gemini AI Core"
+        InsightWorker[Insight Worker] -->|Batch| Gemini[Gemini API]
+        ClusterAnalyzer[Cluster Analyzer] -->|Correlation| Gemini
+    end
+
+    subgraph "API & Dashboard"
+        API[FastAPI Server] -->|Query| DB[(PostgreSQL)]
+        API -->|Read| Graph
+        API -->|Trigger| ClusterAnalyzer
+        API -->|Auth| User[Dashboard / Client]
+    end
+
+    Detection -->|Store| DB
+    InsightWorker -->|Store| DB
+    InsightWorker -->|Poll| Anomaly
+```
+
+### Logical Data Flow
+
 ```text
-Kubernetes
-  -> Prometheus (metrics scraping)
-  -> Metrics Collector (polls every N seconds)
-  -> Redis Queue (buffering)
-  -> Detection Agents (rolling z-score anomaly detection)
-  -> Correlation Engine (NetworkX dependency graph)
-  -> Gemini Reasoning Engine (per-pod root-cause analysis)
-  -> Cluster Analyzer (cluster-wide incident correlation via Gemini)
-  -> FastAPI API (serves results)
-  -> Dashboard
+Telemetry [K8s/Prometheus]
+   │
+   ▼
+[Metrics Collector] ── (Poll 10s) ──► [Redis Stream]
+                                         │
+                                         ▼
+[Detection Agents] ── (Z-Score) ──► [Anomaly Events]
+                                         │
+               ┌─────────────────────────┴─────────────────────────┐
+               ▼                                                   ▼
+[Per-Pod Analysis]                                      [Cluster-Wide Analysis]
+  (Insight Worker)                                         (Cluster Analyzer)
+       │                                                       │
+       ├─► [Gemini AI] ◄───────────────────────────────────────┘
+       │
+       ▼
+[PostgreSQL Store] ◄──────────────── [FastAPI API] ◄──────── [User/Dashboard]
 ```
 
 ## What The Services Do
@@ -277,15 +322,37 @@ The `/cluster/incidents` endpoint is the platform's **highest-level intelligence
 
 #### How It Works
 
-```text
-GET /cluster/incidents
-  → Snapshot: StorageEngine queries anomalies + metrics from the last 1 hour
-  → Dependency Graph: CorrelationEngine exports all known pod-to-pod edges
-  → Structured Input: Per-pod summaries grouped by namespace with anomaly counts,
-    severity levels, z-scores, latest metric values, and dependency edges
-  → Gemini Analysis: Full SRE mega-prompt with the structured input
-  → Response: Top 5 most critical incidents ranked by operational risk
-  → Cache: Result cached for 60 seconds
+```mermaid
+sequenceDiagram
+    participant U as User/Client
+    participant A as ClusterAnalyzer
+    participant S as StorageEngine
+    participant C as CorrelationEngine
+    participant G as Gemini Reasoning Engine
+
+    U->>A: GET /cluster/incidents
+    A->>A: Check Cache
+    alt Cache Hit
+        A-->>U: Return Cached Report
+    else Cache Miss
+        A->>S: query_anomalies(last_1h)
+        S-->>A: [Anomalies]
+        A->>S: query_metrics(last_1h)
+        S-->>A: [Metrics]
+        A->>C: export_json()
+        C-->>A: [Dependency Graph]
+        A->>A: Build Structured Snapshot
+        
+        alt Gemini Configured
+            A->>G: call_gemini(snapshot)
+            G-->>A: [AI Correlation Report]
+        else Fallback Mode
+            A->>A: deterministic_rank(snapshot)
+        end
+        
+        A->>A: Update Cache (60s)
+        A-->>U: Return Incident Report
+    end
 ```
 
 #### Data Sources
